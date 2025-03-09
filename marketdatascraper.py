@@ -10,7 +10,7 @@ import json
 import keyboard
 from PIL import Image
 
-class DarkAndDarkerGameClientScraper:
+class DarkAndDarkerMarketplaceScraper:
     def __init__(self, output_folder="price_data", debug_folder="debug_images"):
         self.output_folder = output_folder
         self.debug_folder = debug_folder
@@ -22,34 +22,47 @@ class DarkAndDarkerGameClientScraper:
         for folder in [output_folder, debug_folder]:
             if not os.path.exists(folder):
                 os.makedirs(folder)
-            
-        # Define regions of interest for the marketplace UI
-        # These will need to be calibrated to your screen resolution
-        self.regions = {
-            "item_name": (300, 200, 400, 30),     # (x, y, width, height)
-            "item_price": (700, 200, 100, 30),    # These are examples and will need adjustment
-            "item_list": (200, 250, 600, 400),
-            "next_page_button": (700, 650, 100, 50)
+        
+        # Define column regions based on the marketplace table layout - updated based on screenshot
+        # These are initial values that should be calibrated
+        self.columns = {
+            "item_name": {"x": 53, "width": 265},
+            "rarity": {"x": 318, "width": 187},
+            "slot": {"x": 505, "width": 191},
+            "type": {"x": 696, "width": 189},
+            "static_attribute": {"x": 885, "width": 190},
+            "random_attribute": {"x": 1075, "width": 187},
+            "expires": {"x": 1262, "width": 188},
+            "price": {"x": 1450, "width": 116},
+            # Optional additional column for quantity/stack (seen in some rows)
+            "quantity": {"x": 1556, "width": 150}
         }
         
-        # Item category locations (for clicking)
-        self.categories = {
-            "weapons": (100, 100),
-            "armor": (100, 150),
-            "consumables": (100, 200),
-            # Add more categories as needed
+        # Row parameters
+        self.first_row_y = 328  # Y-coordinate of the first item row
+        self.row_height = 59   # Height of each item row
+        self.num_visible_rows = 10  # Number of visible rows in the marketplace
+        
+        # Updated rarity colors based on screenshot (BGR format)
+        self.rarity_colors = {
+            "Poor": (128, 128, 128),      # Gray
+            "Common": (255, 255, 255),    # White
+            "Uncommon": (0, 255, 0),      # Green (like Ring of Courage)
+            "Rare": (255, 120, 0),        # Blue (like Fine Cuirass)
+            "Epic": (128, 0, 128),        # Purple (like Ox Pendant)
+            "Legendary": (0, 165, 255)    # Orange (like Radiant Cloak)
         }
         
-        # Known items for validation (update with actual game items)
-        self.known_items = [
-            "leather armor", "longsword", "greataxe", "healing potion", 
-            "plate armor", "wizard staff", "bow", "dagger", "cloak",
-            "mage robe", "shield", "battleaxe", "health potion"
+        # Updated known item types based on screenshot
+        self.known_types = [
+            "Necklace", "Back", "Chest", "Legs", "Primary Weapon", "Hands", 
+            "Ring", "Utility", "Gem", "Sword", "Plate", "Cloth", "Leather",
+            "Drink", "Consumable", "Shield", "Helmet", "Gloves", "Boots"
         ]
         
         # OCR confidence threshold
-        self.confidence_threshold = 60  # Percentage
-        
+        self.confidence_threshold = 40  # Percentage
+    
     def capture_screen_region(self, region):
         """Capture a specific region of the screen"""
         x, y, width, height = region
@@ -71,10 +84,6 @@ class DarkAndDarkerGameClientScraper:
             cv2.THRESH_BINARY_INV, 11, 2
         )
         
-        # Apply noise reduction
-        kernel = np.ones((1, 1), np.uint8)
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-        
         # Save debug image if requested
         if debug_name:
             debug_path = os.path.join(self.debug_folder, f"{debug_name}_original.png")
@@ -84,267 +93,257 @@ class DarkAndDarkerGameClientScraper:
             cv2.imwrite(debug_path, thresh)
         
         # OCR configuration
-        config = '--psm 7 --oem 3'
+        custom_config = '--psm 7 --oem 3'
         if is_numeric:
-            config += ' -c tessedit_char_whitelist="0123456789.,"'
+            # Include comma, period, and 'x' for stack quantities
+            custom_config += ' -c tessedit_char_whitelist="0123456789,.x"'
         
-        # Get detailed OCR data including confidence levels
-        ocr_data = pytesseract.image_to_data(thresh, config=config, output_type=pytesseract.Output.DICT)
+        # Perform OCR
+        text = pytesseract.image_to_string(thresh, config=custom_config).strip()
         
-        # Extract text and confidence from OCR results
-        texts = []
-        confidences = []
+        return text
+    
+    def capture_full_table(self, save_debug=True):
+        """Capture the entire marketplace table"""
+        print("Capturing marketplace table...")
         
-        for i in range(len(ocr_data['text'])):
-            if int(ocr_data['conf'][i]) > self.confidence_threshold:
-                if ocr_data['text'][i].strip():
-                    texts.append(ocr_data['text'][i])
-                    confidences.append(int(ocr_data['conf'][i]))
+        # Capture the full marketplace area including refresh button
+        full_height = self.first_row_y + (self.row_height * self.num_visible_rows) + 10
+        full_width = 1400  # Based on the screenshot width including buy buttons
         
-        # Combine all detected text
-        if texts:
-            text = ' '.join(texts)
-            avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+        full_table = pyautogui.screenshot(region=(0, 0, full_width, full_height))
+        
+        if save_debug:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            full_table.save(os.path.join(self.debug_folder, f"full_table_{timestamp}.png"))
+        
+        return np.array(full_table)
+    
+    def extract_cell_text(self, row_index, column_name, full_table=None):
+        """Extract text from a specific cell in the marketplace table"""
+        # Calculate cell coordinates
+        x = self.columns[column_name]["x"]
+        width = self.columns[column_name]["width"]
+        y = self.first_row_y + (row_index * self.row_height)
+        height = self.row_height - 5  # Slight reduction to avoid overlap
+        
+        # Extract the cell region
+        if full_table is not None:
+            cell_image = full_table[y:y+height, x:x+width]
         else:
-            text = ""
-            avg_confidence = 0
+            cell_image = self.capture_screen_region((x, y, width, height))
         
-        return text, avg_confidence
+        # Debug info
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        debug_name = f"row{row_index}_{column_name}_{timestamp}"
+        
+        # Extract text with OCR
+        is_numeric = column_name in ["price", "quantity"]
+        text = self.extract_text_from_image(cell_image, is_numeric, debug_name)
+        
+        return text, cell_image
     
-    def validate_item_name(self, name):
-        """Validate item name against known items and apply corrections"""
-        name = name.lower().strip()
+    def detect_rarity_from_color(self, image):
+        """Detect item rarity based on the text color in the image"""
+        # Extract a representative color from the text (non-black pixels)
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Similarity score function (simple implementation)
-        def similarity(s1, s2):
-            # Calculate Levenshtein distance
-            m, n = len(s1), len(s2)
-            if m == 0: return n
-            if n == 0: return m
+        # Use mask to ignore background
+        lower_bound = np.array([0, 50, 50])
+        upper_bound = np.array([180, 255, 255])
+        mask = cv2.inRange(hsv, lower_bound, upper_bound)
+        
+        # If no meaningful pixels, return None
+        if cv2.countNonZero(mask) == 0:
+            return None
+        
+        # Get average color of text pixels
+        mean_color = cv2.mean(image, mask=mask)[:3]  # Get BGR values
+        
+        # Find closest rarity by color
+        closest_rarity = None
+        min_distance = float('inf')
+        
+        for rarity, color in self.rarity_colors.items():
+            # Calculate color distance (simple Euclidean)
+            distance = np.sqrt(sum([(a - b) ** 2 for a, b in zip(mean_color, color)]))
             
-            dp = [[0 for _ in range(n+1)] for _ in range(m+1)]
-            
-            for i in range(m+1):
-                dp[i][0] = i
-            for j in range(n+1):
-                dp[0][j] = j
-                
-            for i in range(1, m+1):
-                for j in range(1, n+1):
-                    cost = 0 if s1[i-1] == s2[j-1] else 1
-                    dp[i][j] = min(
-                        dp[i-1][j] + 1,      # deletion
-                        dp[i][j-1] + 1,      # insertion
-                        dp[i-1][j-1] + cost  # substitution
-                    )
-            
-            # Return similarity score (0 to 1)
-            max_len = max(m, n)
-            return 1 - (dp[m][n] / max_len) if max_len > 0 else 1
+            if distance < min_distance:
+                min_distance = distance
+                closest_rarity = rarity
         
-        # Find the best match from known items
-        best_match = None
-        best_score = 0.7  # Minimum similarity threshold
-        
-        for item in self.known_items:
-            score = similarity(name, item)
-            if score > best_score:
-                best_score = score
-                best_match = item
-        
-        if best_match:
-            print(f"OCR read '{name}' - corrected to '{best_match}' (similarity: {best_score:.2f})")
-            return best_match, best_score
-        
-        print(f"Warning: Unrecognized item '{name}' - no close match found")
-        return name, 0
+        return closest_rarity
     
-    def test_ocr_accuracy(self):
-        """Interactive tool to test OCR accuracy on specific screen regions"""
-        print("OCR Testing Tool")
-        print("--------------")
-        print("This will help you test if OCR is correctly reading text from the screen.")
-        print("Press 'C' to capture the current screen region, or 'Q' to quit.")
-        
-        while True:
-            key = keyboard.read_key()
+    def extract_price_value(self, price_text):
+        """Extract numeric price value from price text"""
+        # Handle the gold coin symbol and numeric values
+        # Example: "320" -> 320, "3,500" -> 3500
+        if not price_text:
+            return None
             
-            if key == 'q':
-                break
-                
-            if key == 'c':
-                # Get current mouse position
-                pos = pyautogui.position()
-                
-                # Capture region around mouse position
-                region = (pos.x - 200, pos.y - 15, 400, 30)  # Adjust as needed
-                image = self.capture_screen_region(region)
-                
-                # Save the captured image
-                timestamp = datetime.now().strftime("%H%M%S")
-                debug_name = f"test_capture_{timestamp}"
-                
-                # Extract text with OCR
-                text, confidence = self.extract_text_from_image(
-                    image, is_numeric=False, debug_name=debug_name
-                )
-                
-                # Validate against known items
-                if text:
-                    corrected_text, similarity = self.validate_item_name(text)
-                    
-                    print("\nOCR Test Results:")
-                    print(f"Raw text: '{text}' (confidence: {confidence:.1f}%)")
-                    print(f"Corrected: '{corrected_text}' (similarity: {similarity:.2f})")
-                    print(f"Debug images saved to {self.debug_folder}/{debug_name}_*.png")
-                else:
-                    print("\nNo text detected in the captured region.")
-                
-                # Wait before next capture
-                time.sleep(1)
-    
-    def navigate_to_marketplace(self):
-        """Navigate to the marketplace in the game"""
-        print("Please manually navigate to the marketplace in the game.")
-        print("Position the marketplace window where item names and prices are visible.")
-        print("Press 'S' when ready to start scanning, or 'T' to enter testing mode.")
+        # Remove non-numeric characters except commas and decimals
+        clean_text = ''.join(c for c in price_text if c.isdigit() or c == '.' or c == ',')
+        clean_text = clean_text.replace(',', '')
         
-        key = keyboard.read_key()
-        if key == 't':
-            print("Entering OCR testing mode...")
-            self.test_ocr_accuracy()
-            return False
+        try:
+            return float(clean_text)
+        except ValueError:
+            return None
+    
+    def extract_quantity(self, quantity_text):
+        """Extract quantity information from text (e.g., '37 x 3')"""
+        if not quantity_text or 'x' not in quantity_text.lower():
+            return None, None
             
-        print("Starting marketplace scan...")
-        time.sleep(1)  # Short delay to prepare
-        return True
+        parts = quantity_text.lower().split('x')
+        if len(parts) != 2:
+            return None, None
+            
+        try:
+            unit_price = float(''.join(c for c in parts[0] if c.isdigit() or c == '.' or c == ',').replace(',', ''))
+            quantity = int(''.join(c for c in parts[1] if c.isdigit()))
+            return unit_price, quantity
+        except ValueError:
+            return None, None
     
-    def click_category(self, category_name):
-        """Click on a category in the marketplace"""
-        if category_name in self.categories:
-            x, y = self.categories[category_name]
-            pyautogui.click(x, y)
-            time.sleep(1)  # Wait for the category to load
-            return True
-        return False
-    
-    def detect_items_in_view(self):
-        """Detect and extract information for all items currently visible"""
+    def scrape_marketplace_items(self, save_images=True):
+        """Scrape all visible items from the marketplace"""
+        print("Scraping marketplace items...")
+        
+        # Capture the full table once for efficiency
+        full_table = self.capture_full_table(save_debug=save_images)
+        
         items = []
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Capture the item list region
-        item_list_img = self.capture_screen_region(self.regions["item_list"])
-        
-        # For demonstration - in a real implementation, you would:
-        # 1. Use image processing to detect individual item rows
-        # 2. For each row, extract the name and price regions
-        # 3. Apply OCR to each region
-        
-        # Simplified approach - scan predefined rows
-        row_height = 40  # Estimated height of each item row
-        num_rows = self.regions["item_list"][3] // row_height
-        
-        for i in range(num_rows):
-            # Calculate the y-offset for this row
-            y_offset = i * row_height
-            
-            # Extract name region for this row
-            name_region = (
-                self.regions["item_name"][0],
-                self.regions["item_name"][1] + y_offset,
-                self.regions["item_name"][2],
-                self.regions["item_name"][3]
-            )
-            name_img = self.capture_screen_region(name_region)
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            debug_name = f"item_{i}_name_{timestamp}"
-            item_name, name_confidence = self.extract_text_from_image(name_img, debug_name=debug_name)
-            
-            # Extract price region for this row
-            price_region = (
-                self.regions["item_price"][0],
-                self.regions["item_price"][1] + y_offset,
-                self.regions["item_price"][2],
-                self.regions["item_price"][3]
-            )
-            price_img = self.capture_screen_region(price_region)
-            debug_name = f"item_{i}_price_{timestamp}"
-            price_text, price_confidence = self.extract_text_from_image(
-                price_img, is_numeric=True, debug_name=debug_name
-            )
-            
-            # Validate and correct the item name
-            corrected_name, similarity = self.validate_item_name(item_name)
-            
-            # Process the price text to extract numeric value
+        for row_index in range(self.num_visible_rows):
             try:
-                price_value = float(price_text.replace("G", "").replace(",", "").strip())
+                # Check if row is empty by looking at item name
+                item_name_text, item_name_img = self.extract_cell_text(row_index, "item_name", full_table)
                 
-                # Only add if we successfully extracted a name and price
-                if corrected_name and price_value > 0 and similarity > 0:
-                    items.append({
-                        "name": corrected_name,
-                        "original_name": item_name,
-                        "name_confidence": name_confidence,
-                        "price": price_value,
-                        "price_confidence": price_confidence,
-                        "similarity_score": similarity,
-                        "timestamp": datetime.now().isoformat()
-                    })
-            except (ValueError, TypeError):
-                continue  # Skip this item if price conversion fails
+                if not item_name_text:
+                    continue  # Skip empty rows
+                
+                # Extract data from each column
+                rarity_text, rarity_img = self.extract_cell_text(row_index, "rarity", full_table)
+                slot_text, _ = self.extract_cell_text(row_index, "slot", full_table)
+                type_text, _ = self.extract_cell_text(row_index, "type", full_table)
+                static_attr_text, _ = self.extract_cell_text(row_index, "static_attribute", full_table)
+                random_attr_text, _ = self.extract_cell_text(row_index, "random_attribute", full_table)
+                expires_text, _ = self.extract_cell_text(row_index, "expires", full_table)
+                price_text, _ = self.extract_cell_text(row_index, "price", full_table)
+                quantity_text, _ = self.extract_cell_text(row_index, "quantity", full_table)
+                
+                # Process price (remove gold coin symbol, parse number)
+                price_value = self.extract_price_value(price_text)
+                
+                # Process quantity if applicable
+                unit_price, quantity = self.extract_quantity(quantity_text)
+                
+                # Detect rarity from color if OCR failed
+                if not rarity_text or rarity_text not in self.rarity_colors:
+                    detected_rarity = self.detect_rarity_from_color(item_name_img)
+                    if detected_rarity:
+                        rarity_text = detected_rarity
+                
+                # Create item record
+                item = {
+                    "item_name": item_name_text,
+                    "rarity": rarity_text,
+                    "slot": slot_text,
+                    "type": type_text,
+                    "static_attribute": static_attr_text,
+                    "random_attribute": random_attr_text,
+                    "expires": expires_text,
+                    "price": price_value,
+                    "price_text": price_text,
+                    "is_stack": bool(unit_price and quantity),
+                    "unit_price": unit_price,
+                    "quantity": quantity,
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                print(f"Found item: {item_name_text} - {rarity_text} - {price_text}")
+                items.append(item)
+                
+            except Exception as e:
+                print(f"Error processing row {row_index}: {e}")
         
         return items
     
-    def click_next_page(self):
-        """Click the next page button"""
-        x, y = self.regions["next_page_button"][0] + self.regions["next_page_button"][2] // 2, \
-               self.regions["next_page_button"][1] + self.regions["next_page_button"][3] // 2
-        pyautogui.click(x, y)
-        time.sleep(1.5)  # Wait for the next page to load
+    def click_refresh_button(self):
+        """Click the refresh button in the marketplace"""
+        # Refresh button location from the screenshot
+        refresh_x = 1791
+        refresh_y = 30
+        
+        pyautogui.click(refresh_x, refresh_y)
+        print("Clicked refresh button")
+        time.sleep(2)  # Wait for refresh
     
-    def scan_category(self, category_name, max_pages=5):
-        """Scan a specific category for items"""
-        if not self.click_category(category_name):
-            print(f"Category {category_name} not found in configured categories")
-            return []
-            
+    def run_marketplace_scan(self, num_refreshes=5, delay_between_refreshes=3):
+        """Run a full scan of the marketplace with multiple refreshes"""
         all_items = []
         
-        for page in range(max_pages):
-            print(f"Scanning page {page+1} of {category_name}...")
+        print(f"Starting marketplace scan with {num_refreshes} refreshes...")
+        
+        for i in range(num_refreshes):
+            print(f"\nScan {i+1}/{num_refreshes}")
             
-            # Detect items currently in view
-            items = self.detect_items_in_view()
+            # Scrape current page
+            items = self.scrape_marketplace_items()
             all_items.extend(items)
             
-            # Click next page unless we're on the last page
-            if page < max_pages - 1:
-                self.click_next_page()
-                
+            # Save current batch
+            self.save_data(items, f"marketplace_scan_{i+1}.csv")
+            
+            # Refresh the marketplace
+            if i < num_refreshes - 1:  # Don't refresh after the last scan
+                self.click_refresh_button()
+                time.sleep(delay_between_refreshes)
+        
+        # Save all data
+        self.save_data(all_items, "marketplace_complete.csv")
+        
+        # Create a summary
+        self.create_market_summary(all_items)
+        
+        print(f"\nScan completed. Scraped {len(all_items)} items.")
+        print(f"Data saved to {self.output_folder}/")
+        
         return all_items
     
-    def run_full_scan(self):
-        """Run a full scan of all categories"""
-        if not self.navigate_to_marketplace():
-            return {}
-        
-        all_data = {}
-        for category_name in self.categories.keys():
-            print(f"Scanning category: {category_name}")
-            items = self.scan_category(category_name)
-            all_data[category_name] = items
+    def create_market_summary(self, items):
+        """Create a summary of marketplace data"""
+        if not items:
+            return
             
-            # Save category data
-            self.save_data(items, f"{category_name.lower().replace(' ', '_')}.csv")
+        df = pd.DataFrame(items)
         
-        # Save complete dataset
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        with open(f"{self.output_folder}/full_scan_{timestamp}.json", "w") as f:
-            json.dump(all_data, f, indent=2)
-            
-        print(f"Scan completed. Saved data to {self.output_folder}/")
-        return all_data
+        # Summary by item type
+        type_summary = df.groupby('type').agg({
+            'item_name': 'count',
+            'price': ['mean', 'min', 'max']
+        }).reset_index()
+        
+        # Summary by rarity
+        rarity_summary = df.groupby('rarity').agg({
+            'item_name': 'count',
+            'price': ['mean', 'min', 'max']
+        }).reset_index()
+        
+        # Save summaries
+        type_summary.to_csv(f"{self.output_folder}/summary_by_type.csv")
+        rarity_summary.to_csv(f"{self.output_folder}/summary_by_rarity.csv")
+        
+        print("\nMarket Summary:")
+        print(f"Total Items: {len(items)}")
+        print("\nBy Rarity:")
+        for _, row in rarity_summary.iterrows():
+            if pd.notna(row[('price', 'mean')]):
+                print(f"{row['rarity']}: {row[('item_name', 'count')]} items, Avg: {row[('price', 'mean')]:.1f}g")
+            else:
+                print(f"{row['rarity']}: {row[('item_name', 'count')]} items, Avg: N/A")
     
     def save_data(self, items, filename):
         """Save scraped data to CSV file"""
@@ -354,72 +353,108 @@ class DarkAndDarkerGameClientScraper:
         df = pd.DataFrame(items)
         df.to_csv(f"{self.output_folder}/{filename}", index=False)
     
-    def add_known_items(self, items_list):
-        """Add items to the known items list for validation"""
-        for item in items_list:
-            if item.lower() not in self.known_items:
-                self.known_items.append(item.lower())
-        print(f"Added {len(items_list)} items to known items list. Total: {len(self.known_items)}")
+    def wait_for_trigger_key(self, key='space'):
+        """Wait for a specific key to be pressed before continuing"""
+        print(f"Press '{key}' when you are ready...")
+        keyboard.wait(key)
+        print(f"'{key}' pressed. Continuing...")
+        # Add a small delay to account for window focus change
+        time.sleep(0.5)
     
-    def calibrate_ui_regions(self):
-        """Interactive tool to calibrate UI regions"""
-        print("UI Calibration Tool")
-        print("-------------------")
-        print("This will help you set up the screen regions for the marketplace UI.")
-        print("For each region, you'll need to identify the top-left corner and dimensions.")
+    def capture_test_screenshot(self, wait_for_key=True):
+        """Capture a test screenshot with an option to wait for a key press"""
+        if wait_for_key:
+            print("Get ready to switch to your game window.")
+            self.wait_for_trigger_key('space')
+            
+        full_table = self.capture_full_table(save_debug=True)
+        print("Test image saved to debug folder")
+        return full_table
+    
+    def calibrate_table_layout(self, wait_for_key=True):
+        """Interactive tool to calibrate the marketplace table layout"""
+        print("Table Layout Calibration Tool")
+        print("----------------------------")
+        print("This will help you calibrate the column positions.")
         
-        for region_name in self.regions:
-            print(f"\nCalibrating region: {region_name}")
-            print("Move your mouse to the top-left corner and press 'C'")
-            keyboard.wait('c')
-            start_pos = pyautogui.position()
-            
-            print("Now move your mouse to the bottom-right corner and press 'C'")
-            keyboard.wait('c')
-            end_pos = pyautogui.position()
-            
-            # Calculate and save the region
-            x = start_pos.x
-            y = start_pos.y
-            width = end_pos.x - start_pos.x
-            height = end_pos.y - start_pos.y
-            
-            self.regions[region_name] = (x, y, width, height)
-            print(f"Region {region_name} set to: {self.regions[region_name]}")
+        if wait_for_key:
+            print("Get ready to switch to your game window.")
+            self.wait_for_trigger_key('space')
         
-        print("\nCalibration complete. Here are your configured regions:")
-        for region_name, dimensions in self.regions.items():
-            print(f"{region_name}: {dimensions}")
+        print("\nFirst, let's set the position of the first row.")
+        print("\nMove your mouse to the top of the first item row and press 'C'")
+        keyboard.wait('c')
+        first_row_y = pyautogui.position().y
+        self.first_row_y = first_row_y
+        print(f"First row Y position set to: {first_row_y}")
+        
+        print("\nNow let's calibrate each column. For each column, move your cursor to:")
+        print("1. The left edge of the column and press 'L'")
+        print("2. The right edge of the column and press 'R'")
+        
+        for column_name in self.columns.keys():
+            print(f"\nCalibrating column: {column_name}")
+            
+            print("Move to left edge and press 'L'")
+            keyboard.wait('l')
+            left_x = pyautogui.position().x
+            
+            print("Move to right edge and press 'R'")
+            keyboard.wait('r')
+            right_x = pyautogui.position().x
+            
+            self.columns[column_name]["x"] = left_x
+            self.columns[column_name]["width"] = right_x - left_x
+            
+            print(f"Column {column_name} set to: x={left_x}, width={right_x-left_x}")
+        
+        print("\nFinally, let's measure the row height.")
+        print("Move to the top of the first row and press 'T'")
+        keyboard.wait('t')
+        top_y = pyautogui.position().y
+        
+        print("Move to the top of the second row and press 'B'")
+        keyboard.wait('b')
+        bottom_y = pyautogui.position().y
+        
+        self.row_height = bottom_y - top_y
+        print(f"Row height set to: {self.row_height}")
+        
+        # Set the number of visible rows
+        print("\nHow many rows are visible in the marketplace? (Default is 10)")
+        try:
+            num_rows = int(input("Enter number of rows: "))
+            if num_rows > 0:
+                self.num_visible_rows = num_rows
+        except ValueError:
+            print("Using default value of 10 rows")
+        
+        print("\nCalibration complete. Here are your configured settings:")
+        print(f"First row Y: {self.first_row_y}")
+        print(f"Row height: {self.row_height}")
+        print(f"Number of visible rows: {self.num_visible_rows}")
+        print("Columns:")
+        for column_name, dimensions in self.columns.items():
+            print(f"  {column_name}: x={dimensions['x']}, width={dimensions['width']}")
 
 # Example usage
 if __name__ == "__main__":
-    # Create scraper instance
-    scraper = DarkAndDarkerGameClientScraper()
+    scraper = DarkAndDarkerMarketplaceScraper()
     
-    # Add known Dark and Darker items to improve recognition
-    dark_and_darker_items = [
-        "Leather Armor", "Plate Armor", "Chain Mail", "Robe", 
-        "Longsword", "Shortsword", "Greataxe", "Battleaxe", "Dagger",
-        "Crossbow", "Longbow", "Shortbow", "Wizard Staff", "Spellbook",
-        "Health Potion", "Mana Potion", "Bandage", "Torch", "Lockpick",
-        "Shield", "Buckler", "Helmet", "Boots", "Gloves", "Cloak",
-        "Amulet", "Ring", "Wizard Hat", "Adventurer's Pack",
-        # Add more actual game items here
-    ]
-    scraper.add_known_items(dark_and_darker_items)
-    
-    # Choose what to run
-    print("Dark and Darker Market Scanner")
-    print("1. Calibrate UI regions")
-    print("2. Test OCR accuracy")
-    print("3. Run full marketplace scan")
+    print("Dark and Darker Marketplace Scanner")
+    print("1. Calibrate table layout")
+    print("2. Capture test image")
+    print("3. Run marketplace scan")
     choice = input("Enter your choice (1-3): ")
     
     if choice == "1":
-        scraper.calibrate_ui_regions()
+        scraper.calibrate_table_layout(wait_for_key=True)
     elif choice == "2":
-        scraper.test_ocr_accuracy()
+        scraper.capture_test_screenshot(wait_for_key=True)
     elif choice == "3":
-        scraper.run_full_scan()
+        num_refreshes = int(input("Enter number of refreshes (1-10): "))
+        print("Get ready to switch to your game window.")
+        scraper.wait_for_trigger_key('space')
+        scraper.run_marketplace_scan(num_refreshes=num_refreshes)
     else:
         print("Invalid choice.")
